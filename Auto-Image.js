@@ -2218,7 +2218,8 @@
         const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
         if (isMobile) {
           input.accept += ",image/*"
-          input.capture = "environment" // Use rear camera by default
+          // Removed input.capture to allow multiple options (Files, Camera, Photos) on iOS
+          // Setting capture would force camera-only mode
         }
         
         // Add timeout for mobile compatibility
