@@ -2208,16 +2208,109 @@
     },
 
     createImageUploader: () =>
-      new Promise((resolve) => {
+      new Promise((resolve, reject) => {
         const input = document.createElement("input")
         input.type = "file"
-        input.accept = "image/png,image/jpeg"
-        input.onchange = () => {
-          const fr = new FileReader()
-          fr.onload = () => resolve(fr.result)
-          fr.readAsDataURL(input.files[0])
+        input.accept = "image/png,image/jpeg,image/jpg,image/webp"
+        input.style.display = "none"
+        
+        // Add camera support for mobile devices
+        const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+        if (isMobile) {
+          input.accept += ",image/*"
+          input.capture = "environment" // Use rear camera by default
         }
-        input.click()
+        
+        // Add timeout for mobile compatibility
+        let timeoutId = null
+        
+        input.onchange = (event) => {
+          if (timeoutId) {
+            clearTimeout(timeoutId)
+            timeoutId = null
+          }
+          
+          const file = event.target.files[0]
+          if (!file) {
+            resolve(null)
+            return
+          }
+          
+          // Validate file size (max 10MB)
+          if (file.size > 10 * 1024 * 1024) {
+            reject(new Error("File size too large. Please select an image smaller than 10MB."))
+            return
+          }
+          
+          const fr = new FileReader()
+          
+          fr.onload = (e) => {
+            try {
+              resolve(e.target.result)
+            } catch (error) {
+              reject(new Error("Failed to read image file"))
+            }
+          }
+          
+          fr.onerror = () => {
+            reject(new Error("Error reading file"))
+          }
+          
+          fr.onabort = () => {
+            reject(new Error("File reading was aborted"))
+          }
+          
+          try {
+            fr.readAsDataURL(file)
+          } catch (error) {
+            reject(new Error("Failed to start reading file"))
+          }
+        }
+        
+        // Handle cancel/no file selected (especially important for mobile)
+        input.oncancel = () => {
+          if (timeoutId) {
+            clearTimeout(timeoutId)
+            timeoutId = null
+          }
+          resolve(null)
+        }
+        
+        // For mobile browsers, add the input to DOM temporarily
+        document.body.appendChild(input)
+        
+        // Add timeout to handle cases where file dialog doesn't open on mobile
+        timeoutId = setTimeout(() => {
+          console.warn("File dialog timeout - this may indicate a mobile browser issue")
+          document.body.removeChild(input)
+          resolve(null)
+        }, 60000) // 60 second timeout
+        
+        try {
+          // For iOS Safari, we need to trigger the click in a user interaction context
+          if (/iPad|iPhone|iPod/.test(navigator.userAgent)) {
+            // Add a small delay for iOS Safari
+            setTimeout(() => {
+              input.click()
+            }, 10)
+          } else {
+            input.click()
+          }
+        } catch (error) {
+          if (timeoutId) {
+            clearTimeout(timeoutId)
+            timeoutId = null
+          }
+          document.body.removeChild(input)
+          reject(new Error("Failed to open file dialog"))
+        }
+        
+        // Clean up after selection
+        setTimeout(() => {
+          if (document.body.contains(input)) {
+            document.body.removeChild(input)
+          }
+        }, 1000)
       }),
 
     createFileDownloader: (data, filename) => {
@@ -2641,17 +2734,71 @@
     async load() {
       return new Promise((resolve, reject) => {
         this.img = new Image()
-        this.img.crossOrigin = "anonymous"
-        this.img.onload = () => {
-          this.canvas = document.createElement("canvas")
-          this.ctx = this.canvas.getContext("2d")
-          this.canvas.width = this.img.width
-          this.canvas.height = this.img.height
-          this.ctx.drawImage(this.img, 0, 0)
-          resolve()
+        
+        // Remove crossOrigin for data URLs as it can cause issues on mobile
+        if (!this.imageSrc.startsWith('data:')) {
+          this.img.crossOrigin = "anonymous"
         }
-        this.img.onerror = reject
-        this.img.src = this.imageSrc
+        
+        // Add timeout for image loading
+        const timeout = setTimeout(() => {
+          reject(new Error("Image loading timeout - this may be due to large file size or network issues"))
+        }, 30000) // 30 second timeout
+        
+        this.img.onload = () => {
+          clearTimeout(timeout)
+          try {
+            // Validate image dimensions
+            if (this.img.width === 0 || this.img.height === 0) {
+              reject(new Error("Invalid image dimensions"))
+              return
+            }
+            
+            // Check if image is too large (max 4000x4000 pixels)
+            if (this.img.width > 4000 || this.img.height > 4000) {
+              reject(new Error("Image too large. Please use an image smaller than 4000x4000 pixels."))
+              return
+            }
+            
+            this.canvas = document.createElement("canvas")
+            this.ctx = this.canvas.getContext("2d")
+            
+            if (!this.ctx) {
+              reject(new Error("Failed to get canvas context"))
+              return
+            }
+            
+            this.canvas.width = this.img.width
+            this.canvas.height = this.img.height
+            
+            // Clear canvas before drawing
+            this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height)
+            this.ctx.drawImage(this.img, 0, 0)
+            
+            resolve()
+          } catch (error) {
+            clearTimeout(timeout)
+            reject(new Error("Failed to process image: " + error.message))
+          }
+        }
+        
+        this.img.onerror = (error) => {
+          clearTimeout(timeout)
+          console.error("Image loading error:", error)
+          reject(new Error("Failed to load image. Please check the file format and try again."))
+        }
+        
+        this.img.onabort = () => {
+          clearTimeout(timeout)
+          reject(new Error("Image loading was aborted"))
+        }
+        
+        try {
+          this.img.src = this.imageSrc
+        } catch (error) {
+          clearTimeout(timeout)
+          reject(new Error("Failed to set image source: " + error.message))
+        }
       })
     }
 
@@ -6685,8 +6832,17 @@
 
         try {
           updateUI("loadingImage", "default")
+          
+          // Add visual feedback for mobile users
+          const originalButtonText = uploadBtn.innerHTML;
+          uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> <span>Loading...</span>';
+          uploadBtn.disabled = true;
+          
           const imageSrc = await Utils.createImageUploader()
           if (!imageSrc) {
+            // Restore button state
+            uploadBtn.innerHTML = originalButtonText;
+            uploadBtn.disabled = false;
             updateUI("colorsFound", "success", { count: state.availableColors.length });
             return;
           }
@@ -6748,8 +6904,29 @@
           updateStats()
           updateDataButtons()
           updateUI("imageLoaded", "success", { count: totalValidPixels })
-        } catch {
-          updateUI("imageError", "error")
+          
+          // Restore button state
+          uploadBtn.innerHTML = originalButtonText;
+          uploadBtn.disabled = false;
+        } catch (error) {
+          console.error("Image loading error:", error);
+          let errorMessage = Utils.t("imageError");
+          
+          // Show more specific error messages based on the error type
+          if (error.message.includes("File size too large")) {
+            errorMessage = "❌ File too large. Please select an image smaller than 10MB.";
+          } else if (error.message.includes("Failed to read")) {
+            errorMessage = "❌ Failed to read image file. Please try again.";
+          } else if (error.message.includes("Failed to open file dialog")) {
+            errorMessage = "❌ Cannot open file dialog. Please try refreshing the page.";
+          }
+          
+          updateUI("imageError", "error");
+          Utils.showAlert(errorMessage, "error");
+          
+          // Restore button state
+          uploadBtn.innerHTML = originalButtonText;
+          uploadBtn.disabled = false;
         }
       })
     }
